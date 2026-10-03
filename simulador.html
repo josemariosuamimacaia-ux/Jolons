@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>MacTech — simulador</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@500;800&family=Figtree:wght@400;600&display=swap">
+<style>
+:root{--bg:#e9f0ec;--ink:#10201e;--mut:#506560;--card:#fff;--out:#d4f4c6;--hum:#ffe9b8;--acc:#128c4a;--accT:#fff;--line:#c9d8d1;--chat:#f3efe6;
+box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0d1917;--ink:#e6f1ed;--mut:#93aaa3;--card:#16272b;--out:#1d5a3a;--hum:#6b5316;--acc:#2fcf7a;--accT:#06251a;--line:#27413d;--chat:#0f1f1e}}
+:root[data-theme="dark"]{--bg:#0d1917;--ink:#e6f1ed;--mut:#93aaa3;--card:#16272b;--out:#1d5a3a;--hum:#6b5316;--acc:#2fcf7a;--accT:#06251a;--line:#27413d;--chat:#0f1f1e}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:400 15px/1.5 Figtree,system-ui,sans-serif}
+h1,h2{font-family:"Bricolage Grotesque",system-ui,sans-serif;margin:0;line-height:1.1}
+h1{font-size:clamp(28px,5vw,42px);font-weight:800}
+h2{font-size:19px;margin-bottom:10px}
+.wrap{max-width:1040px;margin:0 auto;padding:18px 16px 40px}
+.sub{color:var(--mut);margin:8px 0 18px;max-width:70ch}
+.g2{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:14px;min-width:0}
+.btn{background:var(--acc);color:var(--accT);border:0;border-radius:999px;padding:9px 16px;font:600 14px Figtree,sans-serif;cursor:pointer}
+.btn.alt{background:transparent;color:var(--ink);border:1px solid var(--line)}
+.btn:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+input,select,textarea{width:100%;border:1px solid var(--line);border-radius:10px;padding:9px 11px;font:15px Figtree,sans-serif;background:var(--bg);color:var(--ink)}
+label{display:block;font-size:13px;color:var(--mut);margin:8px 0 3px}
+.row{display:flex;gap:8px;margin-top:8px}
+.log{background:var(--chat);height:300px;overflow-y:auto;padding:10px;border-radius:12px;display:flex;flex-direction:column;gap:6px;margin-top:8px}
+.m{max-width:86%;padding:7px 11px;border-radius:12px;white-space:pre-wrap}
+.m.user{background:var(--out);align-self:flex-end}
+.m.assistant{background:var(--card);align-self:flex-start}
+.m.human{background:var(--hum);align-self:flex-start}
+.m small{display:block;color:var(--mut);font-size:11px}
+.badge{display:inline-block;border-radius:999px;padding:1px 9px;font-size:12px;font-weight:600;background:var(--hum)}
+.msg{color:var(--mut);font-size:13px;margin-top:6px;min-height:18px}
+.tw{overflow-x:auto;margin-bottom:10px}
+table{border-collapse:collapse;width:100%;font-size:13px}
+th,td{text-align:left;padding:4px 8px;border-bottom:1px solid var(--line);white-space:nowrap}
+td.w{white-space:normal;min-width:180px}
+#lg{font:12px/1.5 ui-monospace,Menlo,monospace;color:var(--mut);max-height:130px;overflow-y:auto}
+@media(max-width:820px){.g2{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>MacTech: simulador multi-empresa</h1>
+<p class="sub">Experimenta o sistema todo no browser: escreve “olá” e o bot pergunta de que empresa queres ser atendido; depois conversa como cliente, escreve “quero falar com uma pessoa” e responde como operador. As tabelas mostram o que ficaria na base de dados. É uma simulação: os dados desaparecem ao recarregar e não há ligação ao WhatsApp.</p>
+
+<div class="g2">
+<div class="card">
+<h2>Cliente (WhatsApp)</h2>
+<label for="num">Número do cliente</label><input id="num" value="244900000001" inputmode="numeric">
+<div class="msg" id="cemp"></div>
+<div class="log" id="chat" role="log" aria-live="polite"></div>
+<form class="row" id="fc"><input id="tc" placeholder="Escreve “olá” para começar" autocomplete="off" aria-label="Mensagem do cliente"><button class="btn" type="submit">Enviar</button></form>
+</div>
+
+<div class="card">
+<h2>Operador humano</h2>
+<label for="op">Conversa</label><select id="op"></select>
+<div class="log" id="opchat" aria-live="polite"></div>
+<form class="row" id="fo"><input id="to" placeholder="Resposta do operador" autocomplete="off" aria-label="Resposta do operador"><button class="btn" type="submit">Enviar</button></form>
+<div class="row"><button class="btn alt" id="back" type="button">Devolver à IA</button></div>
+<div class="msg" id="opmsg"></div>
+</div>
+</div>
+
+<div class="card" style="margin-bottom:14px">
+<h2>Base de dados</h2>
+<div class="tw"><table id="tE"></table></div>
+<div class="tw"><table id="tC"></table></div>
+<div class="tw"><table id="tM"></table></div>
+</div>
+
+<div class="g2">
+<div class="card">
+<h2>Dados da empresa</h2>
+<form id="fe">
+<label for="en">Nome da empresa</label><input id="en" required>
+<label for="es">Sector (ex.: loja de tecnologia, clínica)</label><input id="es">
+<label for="ed">O que a empresa faz</label><textarea id="ed" rows="2"></textarea>
+<label for="epd">Produtos ou serviços (um por linha, com detalhes)</label><textarea id="epd" rows="4" required></textarea>
+<label for="eho">Horário</label><input id="eho">
+<label for="elo">Contactos e localização</label><input id="elo">
+<label for="epo">Garantia, entrega e pagamento</label><textarea id="epo" rows="2"></textarea>
+<label for="eex">Regras extra para o bot</label><textarea id="eex" rows="2"></textarea>
+<label for="ep">ID do número de WhatsApp (opcional)</label><input id="ep">
+<label><input type="checkbox" id="eh" checked style="width:auto"> Tem equipa humana (humano_ativo)</label>
+<div class="row"><button class="btn" type="submit">Registar empresa</button></div>
+<div class="msg" id="emsg"></div>
+<label for="epv">Texto que a IA vai usar (gerado)</label><textarea id="epv" rows="4" readonly></textarea>
+</form>
+</div>
+<div class="card"><h2>Log do servidor</h2><div id="lg"></div></div>
+</div>
+</div>
+
+<script>
+var S={emp:[],conv:[],msg:[],id:1,busy:false,typing:false,sample:null};
+var MSG_T="Claro! Vou passar a conversa a uma pessoa da equipa. Já te respondem por aqui.";
+var MSG_S="De momento a equipa não está disponível. Deixa aqui a tua mensagem e eu ajudo no que puder.";
+var TERMOS=["reclamacao","humano","atendente","falar com pessoa","falar com uma pessoa"];
+var REGRAS="\n\nRegras: responde em português, mensagens curtas e simpáticas como no WhatsApp. Usa só a informação acima. Nunca inventes preços, stock, prazos nem características: se não souberes, diz que uma pessoa da equipa confirma. Se a pergunta não for sobre o negócio, diz com simpatia que só ajudas com isso.";
+function $(i){return document.getElementById(i)}
+function h(t,c,x){var e=document.createElement(t);if(c)e.className=c;if(x!=null)e.textContent=x;return e}
+function nid(){return S.id++}
+function norm(t){return t.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"")}
+function pede(t){var n=norm(t);return TERMOS.some(function(x){return n.indexOf(x)>-1})}
+function addEmp(n,p,pr,hm){S.emp.push({id:nid(),nome:n,pid:p,prompt:pr,humano:hm})}
+addEmp("Loja Exemplo","111","Loja Exemplo vende telemóveis e portáteis. Catálogo:\n- Portátil Pro 14: 16 GB de RAM, SSD de 512 GB, bateria até 12 h, garantia de 1 ano.\n- Telemóvel Lite 5G: 128 GB, câmara de 50 MP, dual SIM, garantia de 1 ano.",true);
+addEmp("Clínica Exemplo","222","Clínica Exemplo. Serviços: consulta geral, análises e pediatria. Horário: segunda a sexta, 8h às 17h. As marcações fazem-se por mensagem, com nome e data pretendida.",true);
+function log(t){var d=h("div",null,new Date().toLocaleTimeString()+" "+t);$("lg").appendChild(d);$("lg").scrollTop=1e9}
+function empById(id){return S.emp.filter(function(e){return e.id===id})[0]}
+function getConv(n){var c=S.conv.filter(function(x){return x.num===n})[0];if(!c){c={id:nid(),eid:null,num:n,hum:false,from:0};S.conv.push(c)}return c}
+function listaEmp(){return S.emp.map(function(e,i){return (i+1)+" "+e.nome}).join("\n")}
+function achar(t){var n=norm(t),r=S.emp.filter(function(e,i){
+ if(n.trim()===String(i+1))return true;
+ if(n.indexOf(norm(e.nome))>-1)return true;
+ return norm(e.nome).split(" ").some(function(w){return w.length>3&&n.indexOf(w)>-1&&S.emp.filter(function(o){return norm(o.nome).split(" ").indexOf(w)>-1}).length===1})});
+ return r.length===1?r[0]:null}
+function push(c,r,t){S.msg.push({id:nid(),cid:c.id,r:r,c:t})}
+function hist(c){var m=S.msg.filter(function(x){return x.cid===c.id&&x.id>c.from}).slice(-10).map(function(x){return{role:x.r==="user"?"user":"assistant",content:x.c}});while(m.length&&m[0].role!=="user")m.shift();return m}
+async function ai(e,c){
+ if(!S.sample)S.sample=window.claude?await window.claude.use("sample"):null;
+ if(!S.sample)throw{code:"none"};
+ var m=hist(c);m[0]={role:"user",content:e.prompt+REGRAS+"\n\nConversa:\n"+m[0].content};
+ return (await S.sample(m,{cache:false,modelTier:"quick"})).text}
+async function receber(txt){
+ if(S.busy||!txt.trim())return;
+ var num=$("num").value.trim();if(!num)return;
+ var c=getConv(num);push(c,"user",txt.trim());
+ if(norm(txt).indexOf("mudar de empresa")>-1){c.eid=null;c.hum=false}
+ if(!c.eid){
+  var f=achar(txt);
+  if(f){c.eid=f.id;push(c,"assistant","Perfeito! Está a falar com "+f.nome+". Como posso ajudar?");c.from=S.msg[S.msg.length-1].id;log("Conversa "+num+" ligada a "+f.nome)}
+  else push(c,"assistant","Olá! De que empresa quer ser atendido? Responda com o número ou o nome:\n"+listaEmp());
+  render();return}
+ var e=empById(c.eid);
+ if(c.hum){log("["+e.nome+"] "+num+": humano assumiu, a IA não responde");render();return}
+ if(pede(txt)){
+  if(e.humano){c.hum=true;push(c,"assistant",MSG_T);log("[ATENÇÃO] "+e.nome+": cliente "+num+" pediu atendimento humano")}
+  else push(c,"assistant",MSG_S);
+  render();return}
+ S.busy=true;S.typing=true;render();
+ try{push(c,"assistant",await ai(e,c))}
+ catch(x){push(c,"assistant",x&&x.code==="not_granted"?"Aceita o pedido de permissão da IA e tenta de novo.":x&&x.code==="rate_limited"?"Muitas perguntas seguidas. Espera um pouco.":x&&x.code==="none"?"Esta demonstração só tem IA quando aberta pelo link publicado. Se abriste o ficheiro no teu computador, a IA fica no servidor Python.":"Desculpa, tive um problema técnico. Tenta novamente daqui a pouco.");log("Erro na IA: "+(x&&x.code||"desconhecido"))}
+ S.busy=false;S.typing=false;render()}
+function bubbles(box,c,vistaOp){
+ box.textContent="";if(!c)return;
+ S.msg.filter(function(x){return x.cid===c.id}).forEach(function(x){
+  var d=h("div","m "+x.r,x.c);
+  if(x.r==="human"){var s=h("small",null,"equipa");d.prepend(s)}
+  box.appendChild(d)});
+ if(S.typing&&!vistaOp)box.appendChild(h("div","m assistant","…"));
+ box.scrollTop=box.scrollHeight}
+function tabela(t,cab,linhas){
+ t.textContent="";var tr=h("tr");cab.forEach(function(c){tr.appendChild(h("th",null,c))});t.appendChild(tr);
+ linhas.forEach(function(l){var r=h("tr");l.forEach(function(v,i){r.appendChild(h("td",i===l.length-1&&cab[i]==="conteudo"?"w":null,String(v)))});t.appendChild(r)})}
+function nomeEmp(id){var e=empById(id);return e?e.nome:"(por escolher)"}
+function render(){
+ var num=$("num").value.trim(),c=S.conv.filter(function(x){return x.num===num})[0];
+ $("cemp").textContent=c&&c.eid?"Empresa: "+empById(c.eid).nome+" (escreve “mudar de empresa” para trocar)":"Empresa: por escolher";
+ bubbles($("chat"),c,false);
+ var op=$("op"),ov=op.value;op.textContent="";
+ S.conv.forEach(function(x){var o=h("option",null,nomeEmp(x.eid)+" · "+x.num+(x.hum?" · HUMANO":" · IA"));o.value=x.id;op.appendChild(o)});
+ if(!S.conv.length)op.appendChild(h("option",null,"(ainda sem conversas)"));
+ if(ov)op.value=ov;
+ var oc=S.conv.filter(function(x){return String(x.id)===op.value})[0];bubbles($("opchat"),oc,true);
+ tabela($("tE"),["empresas.id","nome","wa_phone_number_id","humano_ativo"],S.emp.map(function(x){return[x.id,x.nome,x.pid,x.humano]}));
+ tabela($("tC"),["conversas.id","empresa","cliente_numero","humano_assumiu"],S.conv.map(function(x){return[x.id,nomeEmp(x.eid),x.num,x.hum]}));
+ tabela($("tM"),["mensagens.id","conversa_id","remetente","conteudo"],S.msg.slice(-8).map(function(x){return[x.id,x.cid,x.r,x.c.length>90?x.c.slice(0,90)+"…":x.c]}))}
+$("num").oninput=render;$("op").onchange=render;
+$("fc").onsubmit=function(ev){ev.preventDefault();var t=$("tc").value;$("tc").value="";receber(t)};
+$("fo").onsubmit=function(ev){ev.preventDefault();
+ var c=S.conv.filter(function(x){return String(x.id)===$("op").value})[0],t=$("to").value.trim(),m=$("opmsg");
+ if(!c||!t){m.textContent="Escolhe uma conversa e escreve o texto.";return}
+ if(!c.hum){m.textContent="Erro 409: esta conversa não foi assumida por humano.";return}
+ push(c,"human",t);$("to").value="";m.textContent="Enviado.";log("[operador] mensagem enviada a "+c.num);render()};
+$("back").onclick=function(){var c=S.conv.filter(function(x){return String(x.id)===$("op").value})[0];if(c){c.hum=false;$("opmsg").textContent="A IA voltou a responder nesta conversa.";log("Conversa "+c.num+" devolvida à IA");render()}};
+$("fe").onsubmit=function(ev){ev.preventDefault();var m=$("emsg");
+ function v(i){return $(i).value.trim()}
+ var nome=v("en"),p=v("ep")||"sim-"+S.id;
+ if(S.emp.some(function(x){return x.pid===p})){m.textContent="Erro 409: já existe uma empresa com esse ID de número.";return}
+ var pr=nome+(v("es")?" ("+v("es")+")":"")+". "+v("ed")+"\nProdutos e serviços:\n"+v("epd").split("\n").filter(Boolean).map(function(l){return"- "+l}).join("\n")+(v("eho")?"\nHorário: "+v("eho"):"")+(v("elo")?"\nContactos e localização: "+v("elo"):"")+(v("epo")?"\nGarantia, entrega e pagamento: "+v("epo"):"")+(v("eex")?"\nRegras extra: "+v("eex"):"");
+ addEmp(nome,p,pr,$("eh").checked);ev.target.reset();$("eh").checked=true;$("epv").value=pr;
+ m.textContent="Empresa registada. Já aparece na escolha do cliente.";log("Empresa registada: "+nome);render()};
+render();log("Servidor simulado a correr.");
+</script>
+</body>
+</html>
