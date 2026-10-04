@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="pt"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MacTech · Painel</title>
+<link rel="stylesheet" href="/static/painel.css">
+</head><body>
+<header><b>Mac<span>Tech</span></b> · Painel <button id="sair" class="btn alt" type="button" hidden>Sair</button></header>
+<main>
+<section id="entrar" class="card">
+<h2>Entrar</h2>
+<p class="msg">Escreve a chave de administração (a tua ADMIN_API_KEY).</p>
+<form id="fl" class="row"><input id="k" type="password" autocomplete="current-password" aria-label="Chave de administração" required><button class="btn" type="submit">Entrar</button></form>
+<p id="ml" class="msg"></p>
+</section>
+<div id="painel" hidden>
+<section class="card">
+<h2>Registar empresa</h2>
+<form id="fe">
+<div class="row"><button class="btn alt" id="ex" type="button">Preencher com um exemplo</button></div>
+<label for="en">Nome da empresa</label><input id="en" required>
+<label for="es">Sector (ex.: loja de tecnologia, clínica)</label><input id="es">
+<label for="ed">O que a empresa faz</label><textarea id="ed" rows="2"></textarea>
+<label for="epd">Produtos ou serviços (um por linha, com detalhes)</label><textarea id="epd" rows="4" required></textarea>
+<label for="eho">Horário</label><input id="eho">
+<label for="elo">Contactos e localização</label><input id="elo">
+<label for="epo">Garantia, entrega e pagamento</label><textarea id="epo" rows="2"></textarea>
+<label for="eex">Regras extra para o bot</label><textarea id="eex" rows="2"></textarea>
+<label class="chk"><input type="checkbox" id="eh" checked> A empresa tem equipa para atender pessoas</label>
+<div class="row"><button class="btn" type="submit">Registar empresa</button></div>
+<p id="me" class="msg"></p>
+</form>
+</section>
+<section class="card"><h2>Estado do sistema</h2>
+<div class="row"><button class="btn" id="dg" type="button">Testar sistema</button></div><div id="dgr"></div></section>
+<section class="card"><h2>Empresas</h2><div id="lista"></div></section>
+<section class="card"><h2>Conversas à espera de uma pessoa</h2><div id="humanos"></div></section>
+<section class="card"><h2>Conversas recentes</h2><div id="conversas"></div><div id="transc"></div></section>
+<section class="card"><h2>Perguntas que o bot não soube responder</h2>
+<p class="msg">Acrescenta estas respostas ao catálogo da empresa para o bot melhorar.</p><div id="semresp"></div></section>
+<section class="card"><h2>Exportar</h2>
+<div class="row"><button class="btn alt" id="csv" type="button">Descarregar contactos e conversas (CSV)</button></div></section>
+</div>
+</main>
+<script src="/static/painel.js"></script>
+</body></html>
