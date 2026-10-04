@@ -282,6 +282,27 @@ def receber_webhook():
 
 
 # ---------- Endpoints extra ----------
+PAGINA_INICIAL = """<!DOCTYPE html>
+<html lang="pt"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MacTech</title>
+<style>
+body{margin:0;min-height:100vh;display:grid;place-items:center;background:#e9f0ec;color:#10201e;font:16px/1.5 system-ui,sans-serif;text-align:center;padding:20px}
+@media(prefers-color-scheme:dark){body{background:#0d1917;color:#e6f1ed}}
+h1{font-size:44px;margin:0 0 8px}h1 span{color:#128c4a}p{margin:6px 0;color:#506560}
+</style></head><body><main>
+<h1>Mac<span>Tech</span></h1>
+<p>Assistentes de atendimento com IA para empresas.</p>
+<p>O servidor está a funcionar.</p>
+</main></body></html>"""
+
+
+@app.get("/")
+def inicio():
+    """Página inicial (sem dados de empresas: o chat de cada empresa está em /c/<slug>)."""
+    return PAGINA_INICIAL
+
+
 @app.get("/saude")
 @app.get("/health")
 def saude():
