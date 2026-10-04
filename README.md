@@ -1,11 +1,15 @@
 # MacTech — servidor multi-empresa (Flask)
 
+> **Versão 2.** Para publicar no Render lê `GUIA_RENDER.md`. Nível 4 (departamentos, atendentes, ERP): `NIVEL4.md` e `INTEGRACAO.md`.
+
 ## Ficheiros
 - `app.py` rotas, multi-tenant e passagem a humano
 - `models.py` base de dados (empresas, conversas, mensagens)
 - `whatsapp.py` assinatura HMAC e envio de mensagens
 - `ia.py` chamada à IA
-- `static/` ficheiros do site (CSS e JavaScript): `chat.css` e `chat.js` (chat web), `style.css` (página inicial). Têm de ir para o GitHub junto com o resto.
+- `assets.py` CSS, JavaScript e HTML do site embutidos (já não precisa de pasta static)
+- `ferramentas.py`, `nivel4.py`, `segredos.py` nível 4 e cifra de tokens
+- `static/` (versão antiga, já não é usada) ficheiros do site (CSS e JavaScript): `chat.css` e `chat.js` (chat web), `style.css` (página inicial). Têm de ir para o GitHub junto com o resto.
 - `config.py` variáveis de ambiente (falha com mensagem clara se faltar alguma)
 
 ## 1. Instalar

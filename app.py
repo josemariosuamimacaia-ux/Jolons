@@ -6,7 +6,9 @@ partilhado (o bot pergunta de que empresa o cliente quer ser atendido).
 import csv
 import hmac
 import io
+import json
 import logging
+import os
 import re
 import threading
 import time
@@ -15,25 +17,32 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta, timezone
 from functools import wraps
 
-from flask import Flask, Response, jsonify, render_template_string, request
+from flask import Flask, Response, abort, jsonify, render_template_string, request
 from sqlalchemy import func, text
 from sqlalchemy.exc import IntegrityError
 from werkzeug.exceptions import HTTPException
 
+import ferramentas
 import ia
+import nivel4
 import whatsapp
+from assets import ASSETS
 from chat_page import PAGINA
 from config import cfg
-from models import Conversa, Empresa, Mensagem, SessionLocal, agora, init_db
+from models import Conversa, Departamento, Empresa, Mensagem, SessionLocal, agora, init_db
+from segredos import cifrar, decifrar
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("mactech")
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder=None)   # os ficheiros do site vêm de assets.py (não de uma pasta)
 if cfg.trust_proxy:   # atrás de um proxy, lê o IP real do visitante
     from werkzeug.middleware.proxy_fix import ProxyFix
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1)
-init_db()
+try:
+    init_db()
+except Exception:   # não rebenta no arranque: /saude e a página de aviso mostram o problema
+    log.exception("Não foi possível preparar a base de dados (confirma DATABASE_URL)")
 executor = ThreadPoolExecutor(max_workers=cfg.max_workers)   # limita o trabalho em paralelo
 
 MSG_TRANSICAO = "Claro! Vou passar a conversa a uma pessoa da equipa. Já te respondem por aqui."
@@ -42,7 +51,11 @@ MSG_SEM_HUMANO = ("De momento a equipa não está disponível para atendimento. 
 MSG_INDISPONIVEL = ("Este atendimento automático está temporariamente indisponível. "
                     "Por favor, contacte a empresa diretamente.")
 MSG_ERRO = "Desculpa, tive um problema técnico. Tenta novamente daqui a pouco."
-TERMOS_HUMANO = ("reclamacao", "humano", "atendente", "falar com pessoa", "falar com uma pessoa")
+MSG_LIMITE = ("Recebemos muitas mensagens hoje e o atendimento automático voltou a ficar ocupado. "
+              "Tenta de novo mais tarde ou contacte a empresa diretamente.")
+MSG_SO_TEXTO = "De momento só consigo ler mensagens de texto. Podes escrever a tua pergunta?"
+TERMOS_HUMANO = ("reclamacao", "humano", "atendente", "falar com pessoa", "falar com uma pessoa", "falar com alguem",
+                 "pessoa real", "operador", "gerente", "responsavel", "falar com a equipa", "falar com um agente")
 SESSAO_RE = re.compile(r"[A-Za-z0-9\-]{16,64}")
 CONTACTO_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+|\+?\d[\d \-]{7,}\d")
 
@@ -100,8 +113,9 @@ def limite_excedido(chave, maximo, janela):
     """Limite simples em memória (protege a IA e a chave de admin contra abuso)."""
     t = time.time()
     with _trinco:
-        if len(_pedidos) > 20000:
-            _pedidos.clear()
+        if len(_pedidos) > 20000:   # limpeza: apaga só as chaves já expiradas (não perdoa quem está a abusar)
+            for k in [k for k, v in _pedidos.items() if not v or t - v[-1] > 3600]:
+                del _pedidos[k]
         recentes = [x for x in _pedidos.get(chave, []) if t - x < janela]
         excedeu = len(recentes) >= maximo
         if not excedeu:
@@ -164,23 +178,67 @@ def registar_contacto(conversa, texto):
             conversa.contacto = m.group(0).strip()[:120]
 
 
-def decidir_resposta(db, empresa, conversa, texto, msg_user):
-    """Lógica comum a todos os canais. Devolve o texto a enviar, ou None se um humano assumiu."""
+def limite_diario_atingido(db, empresa) -> bool:
+    """Protege os custos da IA: máximo de mensagens de clientes por empresa nas últimas 24 h."""
+    desde = agora() - timedelta(days=1)
+    n = (db.query(func.count(Mensagem.id)).join(Conversa, Mensagem.conversa_id == Conversa.id)
+         .filter(Conversa.empresa_id == empresa.id, Mensagem.remetente == "user", Mensagem.data_hora >= desde).scalar())
+    return n > cfg.max_dia_empresa
+
+
+def preparar(db, empresa, conversa, texto):
+    """Decide o que fazer com a mensagem. Devolve ('fixo', texto) para respostas sem IA, ('humano', None)
+    se uma pessoa assumiu, ou ('ia', historico). Faz commit antes de a IA ser chamada, para não manter a
+    base de dados bloqueada durante os segundos que a IA demora a responder."""
     if conversa.humano_assumiu:
-        return None
+        return "humano", None
     if not empresa_ativa(empresa):
         log.warning("[ATENÇÃO] %s: teste terminou ou conta suspensa, bot desligado", empresa.nome)
-        return MSG_INDISPONIVEL
+        return "fixo", MSG_INDISPONIVEL
     if pede_humano(texto):
         if empresa.humano_ativo is not False:
             conversa.humano_assumiu = True
             log.warning("[ATENÇÃO] %s: cliente %s pediu atendimento humano", empresa.nome, conversa.cliente_numero)
-            return MSG_TRANSICAO
-        return MSG_SEM_HUMANO
+            return "fixo", MSG_TRANSICAO
+        return "fixo", MSG_SEM_HUMANO
+    if limite_diario_atingido(db, empresa):
+        log.warning("[ATENÇÃO] %s: limite diário de mensagens atingido", empresa.nome)
+        return "fixo", MSG_LIMITE
+    hist = historico_ia(db, conversa)
+    db.commit()   # liberta a base de dados antes da chamada (lenta) à IA
+    return "ia", hist
+
+
+def montar_ferramentas(db, empresa, conversa, hist):
+    """Nível 4: prompt com departamentos, ferramentas ativas e contexto de quem fala.
+    Devolve (prompt, esquemas, executar). esquemas vazio = empresa sem ferramentas (resposta normal)."""
+    deps = db.query(Departamento).filter_by(empresa_id=empresa.id).order_by(Departamento.id).all()
+    esquemas = ferramentas.esquemas(empresa, deps)
+    prompt = empresa.system_prompt + (ferramentas.bloco_departamentos(deps) if esquemas else "")
+    if not esquemas:
+        return prompt, [], None
+    whats = conversa.phone_number_id != "web"
+    contactos = ferramentas.contactos_em([m["content"] for m in hist if m["role"] == "user"] + [conversa.contacto or ""])
+    if whats:
+        contactos.add(ferramentas.norm_contacto(conversa.cliente_numero))   # número da Meta: não se falsifica
+    ctx = ferramentas.Contexto(empresa.id, conversa.id, contactos, verificado=whats)
+    return prompt, esquemas, lambda nome, args: ferramentas.executar(ctx, nome, args)
+
+
+def decidir_resposta(db, empresa, conversa, texto, msg_user):
+    """Lógica comum a todos os canais. Devolve o texto a enviar, ou None se um humano assumiu."""
+    tipo, dado = preparar(db, empresa, conversa, texto)
+    if tipo == "humano":
+        return None
+    if tipo == "fixo":
+        return dado
     try:
-        resposta, sem = ia.responder(empresa.system_prompt, historico_ia(db, conversa))
+        prompt, esq, executar = montar_ferramentas(db, empresa, conversa, dado)
+        resposta, sem = ia.responder(prompt, dado, esq, executar)
         if sem:
             msg_user.sem_resposta = True   # fica na lista "perguntas sem resposta" do painel
+        if esq:
+            db.refresh(conversa)   # uma ferramenta pode ter passado a conversa a uma pessoa
         return resposta
     except Exception as erro:
         log.error("Erro na IA: %s | %s", erro, ia.explicar_erro(str(erro)))
@@ -188,15 +246,32 @@ def decidir_resposta(db, empresa, conversa, texto, msg_user):
 
 
 # ---------- WhatsApp ----------
+_em_curso, _trinco_wa = set(), threading.Lock()
+
+
 def processar(pnid: str, msg: dict):
     """Trata UMA mensagem recebida do WhatsApp. Corre numa thread do pool."""
+    wa_id = msg.get("id")
+    if wa_id:
+        with _trinco_wa:   # a Meta pode reenviar o mesmo pedido enquanto o primeiro ainda está a ser tratado
+            if wa_id in _em_curso:
+                return
+            _em_curso.add(wa_id)
     try:
-        if msg.get("type") != "text":
-            return
+        _processar(pnid, msg)
+    finally:
+        if wa_id:
+            with _trinco_wa:
+                _em_curso.discard(wa_id)
+
+
+def _processar(pnid: str, msg: dict):
+    try:
         numero = msg["from"]
-        texto = (msg["text"]["body"] or "").strip()[:2000]
+        tipo = msg.get("type")
+        texto = ((msg.get("text") or {}).get("body") or "").strip()[:2000] if tipo == "text" else ""
         wa_id = msg.get("id")
-        if not texto:
+        if tipo == "text" and not texto:
             return
         hub = bool(cfg.hub_pnid) and pnid == cfg.hub_pnid   # número partilhado?
         with SessionLocal() as db:
@@ -212,11 +287,17 @@ def processar(pnid: str, msg: dict):
                 if not empresa:
                     log.warning("Webhook para número desconhecido: %s", pnid)
                     return
-                token = empresa.wa_access_token
+                token = decifrar(empresa.wa_access_token)
                 conversa = obter_conversa(db, pnid, numero, empresa.id)
+
+            if tipo != "text":   # áudio, imagem, etc.: avisa o cliente em vez de o deixar sem resposta
+                if tipo in ("audio", "image", "video", "document", "voice", "sticker", "location"):
+                    whatsapp.enviar_texto(token, pnid, numero, MSG_SO_TEXTO)
+                return
 
             mu = guardar(db, conversa, "user", texto, wa_id)
             registar_contacto(conversa, texto)
+            db.commit()   # guarda já a mensagem (e marca-a como tratada) antes de chamar a IA
 
             if hub and "mudar de empresa" in normalizar(texto):   # o cliente pode trocar de empresa
                 conversa.empresa_id, conversa.humano_assumiu, empresa = None, False, None
@@ -307,15 +388,47 @@ def inicio():
     return PAGINA_INICIAL
 
 
+def _ficheiro(nome):
+    a = ASSETS.get(nome)
+    if not a:
+        abort(404)
+    return Response(a[1], content_type=a[0], headers={"Cache-Control": "public, max-age=300"})
+
+
+@app.get("/static/<nome>")
+def ficheiro_estatico(nome):
+    """CSS e JavaScript do site (guardados em assets.py)."""
+    return _ficheiro(nome)
+
+
+@app.before_request
+def verificar_configuracao():
+    """Se faltar configuração, em vez de um erro mudo mostra o que falta (só /saude responde normalmente)."""
+    if cfg.problemas and request.path not in ("/saude", "/health"):
+        itens = "".join(f"<li>{p}</li>" for p in cfg.problemas)
+        return (f"<!DOCTYPE html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
+                f"<body style='font-family:sans-serif;max-width:560px;margin:2rem auto;padding:0 1rem'>"
+                f"<h1>MacTech: falta configurar</h1><p>No Render: serviço, Environment, adiciona:</p><ul>{itens}</ul>"
+                f"<p>Guarda e espera o novo deploy.</p>", 503)
+
+
+@app.get("/agente")
+def agente_pagina():
+    """Página dos atendentes humanos (entram com a chave pessoal)."""
+    return _ficheiro("agente.html")
+
+
 @app.get("/painel")
 def painel():
     """A página é pública, mas todos os dados exigem a ADMIN_API_KEY."""
-    return app.send_static_file("painel.html")
+    return _ficheiro("painel.html")
 
 
 @app.get("/saude")
 @app.get("/health")
 def saude():
+    if cfg.problemas:
+        return jsonify(status="erro", em_falta=list(cfg.problemas)), 503
     try:
         with SessionLocal() as db:
             db.execute(text("SELECT 1"))
@@ -359,11 +472,12 @@ def criar_empresa():
     erros = [c for c, v in (("nome (1 a 120 caracteres)", nome), ("system_prompt (1 a 20000 caracteres)", prompt)) if not v]
     pnid = str(d.get("wa_phone_number_id") or "").strip()[:40] or None
     token = str(d.get("wa_access_token") or "").strip() or None
+    token_cifrado = cifrar(token) if token else None
     if pnid and not token:
         erros.append("wa_access_token")
     if erros:
         return jsonify(erro="campos em falta ou inválidos", campos=erros), 400
-    empresa = Empresa(nome=nome, wa_phone_number_id=pnid, wa_access_token=token, system_prompt=prompt,
+    empresa = Empresa(nome=nome, wa_phone_number_id=pnid, wa_access_token=token_cifrado, system_prompt=prompt,
                       humano_ativo=bool(d.get("humano_ativo", True)), no_hub=bool(d.get("no_hub", True)))
     with SessionLocal() as db:
         empresa.slug = gerar_slug(db, nome)
@@ -564,6 +678,29 @@ def conversas_humano():
         return jsonify(conversas=linhas)
 
 
+def enviar_humano(db, conversa, texto):
+    """Envia a mensagem de uma pessoa ao cliente (WhatsApp ou chat web) e guarda-a. Devolve (corpo, estado HTTP)."""
+    if conversa.phone_number_id == "web":   # chat web: o cliente vê a mensagem ao consultar o servidor
+        guardar(db, conversa, "human", texto)
+        db.commit()
+        return {"enviado": True}, 200
+    if cfg.hub_pnid and conversa.phone_number_id == cfg.hub_pnid:
+        token = cfg.hub_token
+    else:
+        empresa = db.get(Empresa, conversa.empresa_id) if conversa.empresa_id else None
+        token = decifrar(empresa.wa_access_token) if empresa else None
+    if not token:
+        return {"erro": "sem token para enviar por este número"}, 500
+    try:
+        whatsapp.enviar_texto(token, conversa.phone_number_id, conversa.cliente_numero, texto)
+    except Exception:
+        log.exception("Falha ao enviar mensagem do operador")
+        return {"erro": "falha ao enviar pelo WhatsApp"}, 502
+    guardar(db, conversa, "human", texto)
+    db.commit()
+    return {"enviado": True}, 200
+
+
 @app.post("/api/responder-humano")
 @exige_admin
 def responder_humano():
@@ -579,25 +716,8 @@ def responder_humano():
             return jsonify(erro="conversa não encontrada"), 404
         if not conversa.humano_assumiu:
             return jsonify(erro="esta conversa não foi assumida por humano"), 409
-        if pnid == "web":   # chat web: o cliente vê a mensagem ao consultar o servidor
-            guardar(db, conversa, "human", texto)
-            db.commit()
-            return jsonify(enviado=True), 200
-        if cfg.hub_pnid and pnid == cfg.hub_pnid:
-            token = cfg.hub_token
-        else:
-            empresa = db.get(Empresa, conversa.empresa_id)
-            token = empresa.wa_access_token if empresa else None
-        if not token:
-            return jsonify(erro="sem token para enviar por este número"), 500
-        try:
-            whatsapp.enviar_texto(token, pnid, numero, texto)
-        except Exception:
-            log.exception("Falha ao enviar mensagem do operador")
-            return jsonify(erro="falha ao enviar pelo WhatsApp"), 502
-        guardar(db, conversa, "human", texto)
-        db.commit()
-        return jsonify(enviado=True), 200
+        corpo, estado = enviar_humano(db, conversa, texto)
+        return jsonify(corpo), estado
 
 
 @app.post("/api/devolver-ia")
@@ -610,7 +730,7 @@ def devolver_ia():
         c = db.query(Conversa).filter_by(phone_number_id=pnid, cliente_numero=numero).one_or_none()
         if not c:
             return jsonify(erro="conversa não encontrada"), 404
-        c.humano_assumiu = False
+        c.humano_assumiu, c.agente_id, c.departamento_id = False, None, None
         db.commit()
         return jsonify(ok=True), 200
 
@@ -653,6 +773,93 @@ def chat_mensagem(slug):
             novas = [{"id": m.id, "remetente": "assistant", "conteudo": resposta}]
         db.commit()
         return jsonify(mensagens=novas, humano=bool(conversa.humano_assumiu))
+
+
+def _sse(obj) -> str:
+    return "data: " + json.dumps(obj, ensure_ascii=False) + "\n\n"
+
+
+@app.post("/chat/<slug>/stream")
+def chat_stream(slug):
+    """Como /mensagem, mas a resposta da IA chega aos poucos (o cliente vê o texto a aparecer).
+    Se não houver IA a responder (pessoa assumiu, mensagem fixa), devolve JSON normal."""
+    d = request.get_json(silent=True) or {}
+    sessao, texto = str(d.get("sessao", "")), str(d.get("texto", "")).strip()
+    if not SESSAO_RE.fullmatch(sessao) or not texto:
+        return jsonify(erro="pedido inválido"), 400
+    if len(texto) > 1000:
+        return jsonify(erro="Mensagem demasiado longa (máximo 1000 caracteres)."), 400
+    if limite_excedido(("ip", request.remote_addr), 60, 600) or limite_excedido(("sessao", sessao), 20, 600):
+        return jsonify(erro="Muitas mensagens seguidas. Espera um pouco e tenta de novo."), 429
+    with SessionLocal() as db:
+        empresa = db.query(Empresa).filter_by(slug=slug).one_or_none()
+        if not empresa:
+            return jsonify(erro="empresa não encontrada"), 404
+        conversa = obter_conversa(db, "web", sessao, empresa.id)
+        if conversa.empresa_id != empresa.id:
+            return jsonify(erro="sessão inválida"), 400
+        mu = guardar(db, conversa, "user", texto)
+        registar_contacto(conversa, texto)
+        tipo, dado = preparar(db, empresa, conversa, texto)
+        if tipo != "ia":
+            novas = []
+            if tipo == "fixo":
+                m = guardar(db, conversa, "assistant", dado)
+                db.flush()
+                novas = [{"id": m.id, "remetente": "assistant", "conteudo": dado}]
+            db.commit()
+            return jsonify(mensagens=novas, humano=bool(conversa.humano_assumiu))
+        db.flush()
+        prompt, esq, executar = montar_ferramentas(db, empresa, conversa, dado)
+        conversa_id, mu_id = conversa.id, mu.id
+
+    def gerar():
+        parcial, final, sem, guardado = "", None, False, False
+        try:
+            try:
+                if esq:   # nível 4: com ferramentas a resposta chega inteira (a IA consulta sistemas antes de responder)
+                    final, sem = ia.responder(prompt, dado, esq, executar)
+                    yield _sse({"substituir": final})
+                else:
+                    for ev in ia.responder_stream(prompt, dado):
+                        if ev[0] == "texto":
+                            parcial += ev[1]
+                            yield _sse({"t": ev[1]})
+                        else:
+                            _, final, sem = ev
+            except Exception as erro:
+                log.error("Erro na IA (stream): %s | %s", erro, ia.explicar_erro(str(erro)))
+                if not parcial.strip():
+                    final = MSG_ERRO
+                    yield _sse({"substituir": final})
+                else:
+                    final = parcial.strip()
+            if final is not None and parcial.strip() and final != parcial.strip():
+                yield _sse({"substituir": final})   # texto final limpo (ex.: resposta cortada na última frase)
+        finally:
+            # corre mesmo que o cliente feche a página a meio: a conversa fica sempre completa na base de dados
+            texto_guardar = (final if final is not None else parcial).strip()
+            m = None
+            if texto_guardar and not guardado:
+                try:
+                    with SessionLocal() as db2:
+                        m = Mensagem(conversa_id=conversa_id, remetente="assistant", conteudo=texto_guardar, sem_resposta=False)
+                        db2.add(m)
+                        if sem:
+                            u = db2.get(Mensagem, mu_id)
+                            if u:
+                                u.sem_resposta = True
+                        db2.commit()
+                        guardado = True
+                except Exception:
+                    log.exception("Não foi possível guardar a resposta da IA")
+        if m is not None:
+            with SessionLocal() as db3:
+                c3 = db3.get(Conversa, conversa_id)
+                yield _sse({"fim": True, "id": m.id, "humano": bool(c3 and c3.humano_assumiu)})
+
+    return Response(gerar(), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
 
 
 @app.get("/chat/<slug>/mensagens")
@@ -705,12 +912,16 @@ def erro_geral(e):
 def cabecalhos(r):
     r.headers.setdefault("X-Content-Type-Options", "nosniff")
     r.headers.setdefault("Referrer-Policy", "no-referrer")
-    if request.path.startswith("/painel"):
+    if request.path.startswith(("/painel", "/agente")):
         r.headers["X-Frame-Options"] = "DENY"     # o painel não pode ser metido num iframe
+        r.headers["Content-Security-Policy"] = "default-src 'self'; frame-ancestors 'none'"
     if request.path.startswith(("/api/", "/chat/")):
         r.headers["Cache-Control"] = "no-store"
     return r
 
 
+nivel4.registar(app, exige_admin, limite_excedido, iso_utc, enviar_humano, texto_valido)
+
 if __name__ == "__main__":
-    app.run(port=3000)
+    porta = int(os.environ.get("PORT", 3000))   # o Render define PORT
+    app.run(host="0.0.0.0" if os.environ.get("PORT") else "127.0.0.1", port=porta)
