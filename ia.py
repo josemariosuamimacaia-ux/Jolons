@@ -1,4 +1,5 @@
-"""Chamada à IA (Anthropic): regras da empresa, tentativas automáticas e diagnóstico de erros."""
+"""Chamada à IA (Google Gemini): regras da empresa, tentativas automáticas e diagnóstico de erros.
+Mesma interface de antes (responder, responder_stream, explicar_erro, diagnosticar): o app.py não muda."""
 import json
 import logging
 import time
@@ -10,9 +11,10 @@ from config import cfg
 
 log = logging.getLogger("mactech.ia")
 
-URL = "https://api.anthropic.com/v1/messages"
+BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 MARCADOR = "[[SEM_RESPOSTA]]"           # a IA acrescenta isto quando não sabe responder
-RETENTAR = (429, 500, 502, 503, 529)    # erros temporários: vale a pena tentar de novo
+RETENTAR = (429, 500, 502, 503, 504)    # erros temporários: vale a pena tentar de novo
+FOLGA = 1000                            # o Gemini gasta parte do limite a "pensar": damos margem extra
 DIAS = ["segunda-feira", "terça-feira", "quarta-feira", "quinta-feira", "sexta-feira", "sábado", "domingo"]
 
 REGRAS_BASE = (
@@ -42,19 +44,72 @@ def contexto_data() -> str:
     return f"\n\nHoje é {DIAS[t.weekday()]}, {t:%d/%m/%Y}, e são {t:%H:%M} (hora de Luanda)."
 
 
-def _pedir(system: str, historico: list, max_tokens: int = 500, ferramentas: list = None) -> dict:
+# ---------- conversão para o formato do Gemini ----------
+def _cab() -> dict:
+    return {"x-goog-api-key": cfg.ai_key, "content-type": "application/json"}
+
+
+def _schema(s: dict) -> dict:
+    """Converte o esquema de uma ferramenta (formato antigo) para o que o Gemini aceita."""
+    out = {}
+    for k, v in s.items():
+        if k == "type":
+            out[k] = str(v).upper()
+        elif k == "properties":
+            out[k] = {n: _schema(p) for n, p in v.items()}
+        elif k == "items":
+            out[k] = _schema(v)
+        elif k in ("description", "enum", "required"):
+            out[k] = v
+    return out
+
+
+def _ferramentas(esq: list) -> list:
+    return [{"functionDeclarations": [
+        {"name": f["name"], "description": f.get("description", ""), "parameters": _schema(f["input_schema"])}
+        for f in esq]}]
+
+
+def _converter(historico: list) -> list:
+    """[{'role': 'user'|'assistant', 'content': str}] -> formato do Gemini (assistant vira 'model')."""
+    return [{"role": "model" if m["role"] == "assistant" else "user", "parts": [{"text": m["content"]}]}
+            for m in historico]
+
+
+def _corpo(system: str, contents: list, max_tokens: int, ferramentas: list = None) -> dict:
+    corpo = {"system_instruction": {"parts": [{"text": system}]}, "contents": contents,
+             "generationConfig": {"maxOutputTokens": max_tokens + FOLGA}}
+    if ferramentas:
+        corpo["tools"] = _ferramentas(ferramentas)
+    return corpo
+
+
+def _candidato(dados: dict) -> tuple:
+    c = (dados.get("candidates") or [{}])[0]
+    return (c.get("content") or {}), c.get("finishReason")
+
+
+def _texto(partes: list) -> str:
+    return "".join(p.get("text", "") for p in partes if p.get("text") and not p.get("thought"))
+
+
+def _como_objeto(saida) -> dict:
+    """O Gemini exige que o resultado de uma ferramenta seja um objeto JSON."""
+    try:
+        d = json.loads(saida) if isinstance(saida, str) else saida
+    except ValueError:
+        d = None
+    return d if isinstance(d, dict) else {"resultado": saida}
+
+
+# ---------- pedidos ----------
+def _pedir(system: str, contents: list, max_tokens: int = 500, ferramentas: list = None) -> dict:
     """Pede a resposta à IA. Tenta até 3 vezes em erros temporários. Lança RuntimeError se falhar."""
     ultimo = "erro desconhecido"
     for tentativa in range(3):
         try:
-            r = requests.post(
-                URL,
-                headers={"x-api-key": cfg.ai_key, "anthropic-version": "2023-06-01",
-                         "content-type": "application/json"},
-                json={"model": cfg.ai_model, "max_tokens": max_tokens, "system": system, "messages": historico,
-                      **({"tools": ferramentas} if ferramentas else {})},
-                timeout=30,
-            )
+            r = requests.post(f"{BASE}/{cfg.ai_model}:generateContent", headers=_cab(),
+                              json=_corpo(system, contents, max_tokens, ferramentas), timeout=30)
         except requests.RequestException as e:
             ultimo = f"sem ligação à IA: {e}"
         else:
@@ -85,31 +140,33 @@ def responder(system_prompt: str, historico: list, ferramentas: list = None, exe
     ferramentas/executar (nível 4): a IA pode pedir até 4 rondas de ferramentas antes de responder.
     Devolve (texto, sem_resposta). sem_resposta=True se a IA disse que não sabia."""
     system = system_prompt + contexto_data() + REGRAS_BASE
-    msgs = list(historico)
+    contents = _converter(historico)
     dados = {}
     for ronda in range(5):
         usar = ferramentas if (ferramentas and executar and ronda < 4) else None   # na última ronda obriga a responder
-        dados = _pedir(system, msgs, ferramentas=usar)
-        if not (usar and dados.get("stop_reason") == "tool_use"):
+        dados = _pedir(system, contents, ferramentas=usar)
+        conteudo, _ = _candidato(dados)
+        partes = conteudo.get("parts") or []
+        chamadas = [p["functionCall"] for p in partes if "functionCall" in p]
+        if not (usar and chamadas):
             break
-        msgs.append({"role": "assistant", "content": dados.get("content", [])})
+        contents.append({"role": "model", "parts": partes})   # devolve tal como veio (inclui assinaturas internas)
         resultados = []
-        for bloco in dados.get("content", []):
-            if bloco.get("type") != "tool_use":
-                continue
+        for ch in chamadas:
+            nome = ch.get("name", "")
             try:
-                saida = executar(bloco.get("name", ""), bloco.get("input") or {})
+                saida = executar(nome, ch.get("args") or {})
             except Exception:
-                log.exception("Ferramenta %s falhou", bloco.get("name"))
+                log.exception("Ferramenta %s falhou", nome)
                 saida = json.dumps({"erro": "a ferramenta falhou"})
-            resultados.append({"type": "tool_result", "tool_use_id": bloco.get("id"), "content": saida})
-        msgs.append({"role": "user", "content": resultados})
-    texto = "".join(b.get("text", "") for b in dados.get("content", []) if b.get("type") == "text")
-    texto, sem = _limpar(texto)
-    if dados.get("stop_reason") == "max_tokens":
+            resultados.append({"functionResponse": {"name": nome, "response": _como_objeto(saida)}})
+        contents.append({"role": "user", "parts": resultados})
+    conteudo, fim = _candidato(dados)
+    texto, sem = _limpar(_texto(conteudo.get("parts") or []))
+    if fim == "MAX_TOKENS":
         texto = _cortar_frase(texto)
     if not texto:
-        raise ValueError("A IA devolveu uma resposta vazia")
+        raise ValueError(f"A IA devolveu uma resposta vazia (motivo: {fim or dados.get('promptFeedback')})")
     return texto, sem
 
 
@@ -117,14 +174,14 @@ def responder_stream(system_prompt: str, historico: list, max_tokens: int = 500)
     """Como responder(), mas devolve a resposta aos poucos para o cliente ver o texto a aparecer.
     Gera tuplos ('texto', pedaço) e, no fim, ('fim', texto_completo, sem_resposta).
     Lança RuntimeError se a IA falhar antes de enviar qualquer texto."""
-    corpo = {"model": cfg.ai_model, "max_tokens": max_tokens, "stream": True,
-             "system": system_prompt + contexto_data() + REGRAS_BASE, "messages": historico}
-    cab = {"x-api-key": cfg.ai_key, "anthropic-version": "2023-06-01", "content-type": "application/json"}
+    system = system_prompt + contexto_data() + REGRAS_BASE
+    corpo = _corpo(system, _converter(historico), max_tokens)
+    url = f"{BASE}/{cfg.ai_model}:streamGenerateContent?alt=sse"
     r = None
     ultimo = "erro desconhecido"
     for tentativa in range(3):   # só repete antes de começar a receber texto
         try:
-            r = requests.post(URL, headers=cab, json=corpo, timeout=(10, 30), stream=True)
+            r = requests.post(url, headers=_cab(), json=corpo, timeout=(10, 30), stream=True)
         except requests.RequestException as e:
             ultimo = f"sem ligação à IA: {e}"
         else:
@@ -141,7 +198,7 @@ def responder_stream(system_prompt: str, historico: list, max_tokens: int = 500)
     if r is None:
         raise RuntimeError(ultimo)
 
-    completo, enviado, truncado = "", 0, False
+    completo, enviado, truncado, motivo = "", 0, False, None
     try:
         for linha in r.iter_lines(decode_unicode=True):
             if not linha or not linha.startswith("data:"):
@@ -150,9 +207,16 @@ def responder_stream(system_prompt: str, historico: list, max_tokens: int = 500)
                 ev = json.loads(linha[5:].strip())
             except ValueError:
                 continue
-            tipo = ev.get("type")
-            if tipo == "content_block_delta" and ev.get("delta", {}).get("type") == "text_delta":
-                completo += ev["delta"].get("text", "")
+            if "error" in ev:
+                err = ev["error"] if isinstance(ev["error"], dict) else {}
+                raise RuntimeError(f"A API da IA respondeu {err.get('code', 503)}: {err.get('message', ev['error'])}")
+            conteudo, fim = _candidato(ev)
+            if fim:
+                motivo = fim
+                truncado = fim == "MAX_TOKENS"
+            pedaco = _texto(conteudo.get("parts") or [])
+            if pedaco:
+                completo += pedaco
                 # Não mostra o marcador interno nem um pedaço dele que ainda esteja a chegar
                 visivel = completo.replace(MARCADOR, "")
                 for k in range(min(len(MARCADOR) - 1, len(visivel)), 0, -1):
@@ -162,17 +226,13 @@ def responder_stream(system_prompt: str, historico: list, max_tokens: int = 500)
                 if len(visivel) > enviado:
                     yield ("texto", visivel[enviado:])
                     enviado = len(visivel)
-            elif tipo == "message_delta":
-                truncado = ev.get("delta", {}).get("stop_reason") == "max_tokens"
-            elif tipo == "error":
-                raise RuntimeError(f"A API da IA respondeu 529: {ev.get('error', {})}")
     finally:
         r.close()
     texto, sem = _limpar(completo)
     if truncado:
         texto = _cortar_frase(texto)
     if not texto:
-        raise ValueError("A IA devolveu uma resposta vazia")
+        raise ValueError(f"A IA devolveu uma resposta vazia (motivo: {motivo})")
     yield ("fim", texto, sem)
 
 
@@ -181,25 +241,29 @@ def explicar_erro(msg: str) -> str:
     m = msg.lower()
     if "sem ligação" in m:
         return "Não foi possível ligar à IA (internet ou tempo esgotado). Tenta de novo."
-    if " 401" in m:
-        return "A chave da IA (ANTHROPIC_API_KEY) está errada ou foi apagada."
+    if "api key not valid" in m or "api_key_invalid" in m or " 401" in m:
+        return "A chave da IA (GEMINI_API_KEY) está errada ou foi apagada. Cria uma nova em aistudio.google.com."
+    if "leaked" in m:
+        return "O Google bloqueou esta chave por aparecer em público. Cria uma chave nova e não a partilhes."
+    if "location is not supported" in m:
+        return "O Gemini não está disponível na região do servidor. Muda a região do serviço no Render."
     if " 403" in m:
-        return "A chave da IA não tem permissão para este pedido."
+        return "A chave da IA não tem permissão para este pedido (ou o Gemini não está ativo no projeto)."
     if " 404" in m:
-        return f"O modelo '{cfg.ai_model}' não existe. Confirma AI_MODEL (sugestão: claude-haiku-4-5-20251001)."
-    if " 400" in m and "credit" in m:
-        return "A conta da IA está sem crédito. Adiciona crédito no site de programadores da Anthropic."
+        return f"O modelo '{cfg.ai_model}' não existe. Confirma AI_MODEL (sugestão: gemini-3.1-flash-lite)."
+    if " 429" in m:
+        return "O limite gratuito do Gemini foi atingido (ou há pedidos a mais). Espera um pouco ou ativa o pagamento na conta do Google."
     if " 400" in m:
         return "Pedido recusado pela IA. Vê os detalhes no log do servidor."
-    if " 429" in m or " 529" in m:
-        return "A IA está com limite de pedidos ou sobrecarregada. Tenta daqui a pouco."
+    if " 500" in m or " 503" in m or " 504" in m:
+        return "A IA está sobrecarregada de momento. Tenta daqui a pouco."
     return "Erro inesperado na IA. Vê os detalhes no log do servidor."
 
 
 def diagnosticar() -> dict:
-    """Faz um pedido mínimo à IA para confirmar que chave, crédito e modelo estão certos."""
+    """Faz um pedido mínimo à IA para confirmar que chave, limite e modelo estão certos."""
     try:
-        _pedir("Responde apenas: ok", [{"role": "user", "content": "ok"}], max_tokens=10)
+        _pedir("Responde apenas: ok", [{"role": "user", "parts": [{"text": "ok"}]}], max_tokens=10)
         return {"ok": True, "mensagem": "A IA respondeu corretamente."}
     except Exception as e:
         log.warning("Diagnóstico da IA falhou: %s", e)

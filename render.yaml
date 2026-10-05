@@ -1,0 +1,21 @@
+# Blueprint do Render: no painel do Render, New > Blueprint e escolhe o repositório.
+# Cria tudo certo de uma vez (tipo Web Service, comando de arranque com $PORT, chaves).
+services:
+  - type: web
+    name: mactech
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 2 --threads 4 --timeout 120
+    healthCheckPath: /saude
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.7
+      - key: GEMINI_API_KEY
+        sync: false            # o Render pede-te o valor (a chave da IA)
+      - key: ADMIN_API_KEY
+        generateValue: true    # o Render gera uma chave forte (vê em Environment)
+      - key: ENCRYPTION_KEY
+        generateValue: true    # cifra os tokens guardados. NÃO a mudes depois de criares empresas
+      - key: AI_MODEL
+        value: gemini-3.1-flash-lite
