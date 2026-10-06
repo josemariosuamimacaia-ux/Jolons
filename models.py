@@ -30,8 +30,8 @@ def agora():
 
 
 def fim_teste():
-    """O teste grátis dura 2 dias a partir do registo."""
-    return agora() + timedelta(days=2)
+    """O teste grátis dura 1 dia a partir do registo."""
+    return agora() + timedelta(days=1)
 
 
 class Base(DeclarativeBase):
@@ -49,7 +49,7 @@ class Empresa(Base):
     system_prompt: Mapped[str] = mapped_column(Text)     # catálogo + regras do negócio
     humano_ativo: Mapped[bool] = mapped_column(Boolean, default=True)  # a empresa tem equipa para atender?
     no_hub: Mapped[bool] = mapped_column(Boolean, default=True)        # aparece na lista do número partilhado?
-    estado: Mapped[str] = mapped_column(String(10), default="teste")   # 'teste', 'ativo' ou 'suspenso'
+    estado: Mapped[str] = mapped_column(String(10), default="teste")   # 'pendente', 'teste', 'ativo' ou 'suspenso'
     teste_ate: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=fim_teste)
     # Nível 4: ferramentas que a IA pode usar ("stock,encomendas,fatura,departamentos") e ligação ao sistema da empresa
     ferramentas: Mapped[str | None] = mapped_column(Text, nullable=True)

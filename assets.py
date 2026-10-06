@@ -309,7 +309,7 @@ a{color:var(--acc)}
   $('sair').onclick = sair;
 
   function carregarEmpresas() {
-    Promise.all([api('GET', '/api/empresas'), api('GET', '/api/estatisticas?dias=7')]).then(function (r) {
+    Promise.all([api('GET', '/api/empresas'), api('GET', '/api/estatisticas?dias=7'), api('GET', '/api/pedidos')]).then(function (r) {
       preencherN4(r[0].empresas); var st = {}; r[1].empresas.forEach(function (s) { st[s.empresa] = s; });
       var L = $('lista'); L.textContent = '';
       if (!r[0].empresas.length) { L.appendChild(h('p', 'msg', 'Ainda não há empresas. Regista a primeira acima.')); return; }
@@ -318,6 +318,8 @@ a{color:var(--acc)}
         c.appendChild(h('b', null, e.nome + ' '));
         var fim = e.estado === 'teste' && e.teste_ate ? ' até ' + new Date(e.teste_ate).toLocaleString('pt-PT') : '';
         c.appendChild(h('span', 'badge' + (e.ativa ? '' : ' off'), e.estado + fim));
+        var ped = r[2].pedidos[e.id];
+        if (ped) c.appendChild(h('p', 'msg', 'Contacto: ' + ped.contacto + ' · Ref. pagamento: ' + ped.ref_pagamento));
         var s = st[e.nome];
         if (s) c.appendChild(h('p', 'msg', 'Últimos 7 dias: ' + s.pessoas + ' pessoas · ' + s.mensagens_clientes + ' mensagens · ' + s.contactos_recolhidos + ' contactos · ' + s.perguntas_sem_resposta + ' sem resposta'));
         var b = h('div', 'row');
@@ -330,9 +332,9 @@ a{color:var(--acc)}
           cc.onclick = function () { try { navigator.clipboard.writeText(url); cc.textContent = 'Copiado'; } catch (x) { prompt('Copia o link:', url); } };
           b.appendChild(cc);
         }
-        [['Ativar (pagou)', 'ativo'], ['Suspender', 'suspenso'], ['+2 dias de teste', 'teste']].forEach(function (x) {
+        [['Ativar (pagou)', 'ativo'], ['Suspender', 'suspenso'], ['+1 dia de teste', 'teste']].forEach(function (x) {
           var bt = h('button', 'btn alt', x[0]); bt.type = 'button';
-          bt.onclick = function () { api('POST', '/api/empresas/' + e.id + '/estado', { estado: x[1], dias: 2 }).then(carregarEmpresas).catch(erro); };
+          bt.onclick = function () { api('POST', '/api/empresas/' + e.id + '/estado', { estado: x[1], dias: 1 }).then(carregarEmpresas).catch(erro); };
           b.appendChild(bt);
         });
         c.appendChild(b); L.appendChild(c);
@@ -381,7 +383,7 @@ a{color:var(--acc)}
       (v('eho') ? '\nHorário: ' + v('eho') : '') + (v('elo') ? '\nContactos e localização: ' + v('elo') : '') +
       (v('epo') ? '\nGarantia, entrega e pagamento: ' + v('epo') : '') + (v('eex') ? '\nRegras extra: ' + v('eex') : '');
     api('POST', '/api/empresas', { nome: v('en'), system_prompt: pr, humano_ativo: $('eh').checked }).then(function (j) {
-      $('me').textContent = 'Empresa registada. Chat: ' + location.origin + j.chat_url + ' (tem 2 dias de teste).';
+      $('me').textContent = 'Empresa registada. Chat: ' + location.origin + j.chat_url + ' (tem 1 dia de teste).';
       $('fe').reset(); $('eh').checked = true; carregarEmpresas();
     }).catch(function (x) { $('me').textContent = x.message; });
   };

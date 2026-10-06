@@ -19,3 +19,7 @@ services:
         generateValue: true    # cifra os tokens guardados. NÃO a mudes depois de criares empresas
       - key: AI_MODEL
         value: gemini-3.1-flash-lite
+      - key: DATABASE_URL
+        sync: false            # endereço da base PostgreSQL do Neon (neon.tech): sem ele os dados apagam-se a cada deploy
+      - key: PAGAMENTO_INSTRUCOES
+        sync: false            # texto mostrado às empresas: banco, IBAN, valor e como enviar o comprovativo
